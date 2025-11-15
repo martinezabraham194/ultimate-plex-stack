@@ -1,0 +1,6 @@
+This project includes CLINE rule files. To enable all runes in the Cline extension:
+1. Open VSCode → Extensions → Cline (or Cline settings).
+2. Enable "All runes" or equivalent toggle in the extension settings.
+3. Restart the Cline session / VSCode if necessary.
+
+Note: This file is informational because enabling extension runes requires user action in the editor.
