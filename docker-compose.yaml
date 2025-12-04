@@ -1,0 +1,193 @@
+services:
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: plex
+    network_mode: host
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - VERSION=docker
+      - PLEX_CLAIM=${PLEX_CLAIM}
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ${BASE_PATH}/plex/config:/config
+      - ${MEDIA_SHARE}/media/tv:/tv
+      - ${MEDIA_SHARE}/media/movies:/movies
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/radarr/config:/config
+      - ${MEDIA_SHARE}:/share
+    ports:
+      - 7878:7878
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/sonarr/config:/config
+      - ${MEDIA_SHARE}:/share
+    ports:
+      - 8989:8989
+    restart: unless-stopped
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/prowlarr/config:/config
+    ports:
+      - 9696:9696
+    restart: unless-stopped
+
+  overseerr:
+    image: lscr.io/linuxserver/overseerr:develop
+    #image: sctx/overseerr:develop
+    container_name: overseerr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/overseerr/config:/config
+      - ${MEDIA_SHARE}:/share
+    ports:
+      - 5055:5055
+    restart: unless-stopped
+
+  # Gluetun VPN service (runs WireGuard/OpenVPN inside container)
+  # NOTE: For docker-compose (non-swarm) we mount the host WireGuard file into the container.
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      TZ: ${TZ}
+      WEBUI_USER: ${WEBUI_USER:-}
+      WEBUI_PASS: ${WEBUI_PASS:-}
+      VPN_TYPE: wireguard
+      VPN_SERVICE_PROVIDER: custom
+      WIREGUARD_CONF_SECRETFILE: /run/secrets/wg0.conf
+      # Enable provider port forwarding (requires provider/account support)
+      VPN_PORT_FORWARDING: 'on'
+      VPN_PORT_FORWARDING_PROVIDER: protonvpn
+      # Status file written by gluetun when a forwarded port is granted
+      VPN_PORT_FORWARDING_STATUS_FILE: /tmp/gluetun/forwarded_port
+      # Auto-update qBittorrent port (calls local qBittorrent WebUI)
+      # Use /bin/sh to run the helper script so no bash dependency is required.
+      VPN_PORT_FORWARDING_UP_COMMAND: "/bin/sh -c '/gluetun/gluetun-port-forward.sh {{PORTS}}'"
+    volumes:
+      - ./config/wireguard/wg0.conf:/run/secrets/wg0.conf:ro
+      - ./tmp/servers.json:/gluetun/servers.json
+      - ./scripts/gluetun-port-forward.sh:/gluetun/gluetun-port-forward.sh:ro
+      - ./tmp/gluetun:/tmp/gluetun
+    ports:
+      - "${QB_WEBUI_PORT}:31808"    # expose qBittorrent WebUI
+    restart: unless-stopped
+
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: "service:gluetun"
+    depends_on:
+      - gluetun
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - WEBUI_USER=${WEBUI_USER:-}
+      - WEBUI_PASS=${WEBUI_PASS:-}
+      - WEBUI_USERNAME=${WEBUI_USER:-}
+      - WEBUI_PASSWORD=${WEBUI_PASS:-}
+      - WEBUI_PORT=${QB_WEBUI_PORT:-31808}
+      - TORRENTING_PORT=${QB_TORRENT_PORT:-8694}
+    volumes:
+      - ${BASE_PATH}/qbittorrent/config:/config
+      - ${MEDIA_SHARE}:/share
+    restart: unless-stopped
+
+  pf-updater:
+    image: curlimages/curl:8.4.0
+    container_name: pf-updater
+    network_mode: "service:gluetun"
+    depends_on:
+      - gluetun
+    environment:
+      - WEBUI_USER=${WEBUI_USER:-}
+      - WEBUI_PASS=${WEBUI_PASS:-}
+      - QB_WEBUI_PORT=${QB_WEBUI_PORT:-31808}
+    volumes:
+      - ./tmp/gluetun:/tmp/gluetun:ro
+    restart: unless-stopped
+    command: >
+      /bin/sh -c '
+      while true; do
+        if [ -f /tmp/gluetun/forwarded_port ]; then
+          PORT=$(cat /tmp/gluetun/forwarded_port);
+          echo "pf-updater: applying port $${PORT}";
+          STATUS=$(curl -s --http1.1 -o /dev/null -w "%{http_code}" -d "json={\"listen_port\":$${PORT}}" "http://localhost:${QB_WEBUI_PORT}/api/v2/app/setPreferences");
+          if [ "$STATUS" = "200" ]; then
+            echo "pf-updater: applied port $${PORT}";
+            sleep 300;
+          else
+            if [ -n "${WEBUI_USER}" ]; then
+              curl -s --http1.1 -c /tmp/qb_cookie -d "username=${WEBUI_USER}" -d "password=${WEBUI_PASS}" "http://localhost:${QB_WEBUI_PORT}/api/v2/auth/login" >/dev/null 2>&1;
+              STATUS2=$(curl -s --http1.1 -o /dev/null -w "%{http_code}" -b /tmp/qb_cookie -d "json={\"listen_port\":$${PORT}}" "http://localhost:${QB_WEBUI_PORT}/api/v2/app/setPreferences");
+              echo "pf-updater: status $${STATUS2}";
+            fi;
+          fi;
+        fi;
+        sleep 5;
+      done
+      '
+  
+  tdarr:
+    image: haveagitgat/tdarr:latest
+    container_name: tdarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/tdarr/config:/app/config
+      - ${MEDIA_SHARE}:/media
+    ports:
+      - 8265:8265
+    restart: unless-stopped
+
+  tdarr-node:
+    image: haveagitgat/tdarr_node:latest
+    container_name: tdarr-node
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/tdarr/node:/app/config
+      - ${MEDIA_SHARE}:/media
+      - /dev/dri:/dev/dri
+    restart: unless-stopped
+
+volumes: {}

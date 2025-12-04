@@ -1,0 +1,529 @@
+version: "3.8"
+
+# Docker Swarm stack file for "ultimate-plex"
+# Notes:
+# - Some patterns from docker-compose (network_mode: host, network_mode: service:...) are not supported in Swarm.
+# - Plex hardware passthrough and discovery may require running Plex outside Swarm with host networking.
+# - Sensitive values should be created as Docker secrets (see SECRETS_README.md).
+# - Edit .env (create from .env.example) before deploying and create required secrets.
+
+configs: {}
+secrets:
+  proton_user:
+    external: true
+  proton_pass:
+    external: true
+  plex_claim:
+    external: true
+
+networks:
+  media-overlay:
+    driver: overlay
+    attachable: true
+  proxy:
+    external: true
+  vpn-overlay:
+    driver: overlay
+    attachable: true
+
+services:
+
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      resources: {}
+    environment:
+      - TZ=${TZ}
+      - VPNSP=protonvpn
+      - REGION=${PROTONVPN_REGION}
+      # The official gluetun image reads credentials from env OPENVPN_USER/OPENVPN_PASSWORD or from secrets/mounted files.
+      # For security we recommend creating Docker secrets 'proton_user' and 'proton_pass' and mounting below.
+    secrets:
+      - proton_user
+      - proton_pass
+    networks:
+      - vpn-overlay
+      - media-overlay
+    volumes:
+      - ${BASE_PATH}/gluetun:/gluetun
+
+    # NOTE: gluetun requires NET_ADMIN and access to /dev/net/tun to program iptables.
+    # Docker Swarm `stack deploy` ignores `cap_add` and `devices` fields in compose,
+    # so you CANNOT grant NET_ADMIN or bind /dev/net/tun from within a stack file.
+    #
+    # Two valid options:
+    # 1) Run gluetun outside Swarm with docker run (recommended for VPN containers):
+    #    docker run -d --name gluetun \
+    #      --cap-add=NET_ADMIN \
+    #      --device /dev/net/tun \
+    #      -v "${BASE_PATH}/gluetun:/gluetun" \
+    #      -e TZ="${TZ}" -e VPNSP=protonvpn -e REGION="${PROTONVPN_REGION}" \
+    #      -p 31888:8888 \
+    #      qmcgaw/gluetun:latest
+    #
+    # 2) Create a privileged Swarm service from the manager with `docker service create`
+    #    (service-level flags are accepted by the CLI, not by `stack deploy`):
+    #    docker service create --name gluetun-priv \
+    #      --replicas 1 \
+    #      --cap-add NET_ADMIN \
+    #      --mount type=bind,src="${BASE_PATH}/gluetun",dst=/gluetun \
+    #      --mount type=bind,src=/dev/net/tun,dst=/dev/net/tun \
+    #      --env TZ="${TZ}" --env VPNSP=protonvpn --env REGION="${PROTONVPN_REGION}" \
+    #      --secret proton_user --secret proton_pass \
+    #      --publish published=31888,target=8888,mode=host \
+    #      qmcgaw/gluetun:latest
+    #
+    # If you still want to keep an informational `cap_add`/`devices` snippet in the compose file
+    # (it will be ignored by Swarm but is useful for documentation / `docker-compose` users), you
+    # can add the following under the service (commented here for clarity).
+    #
+    # NOTE: The lines below are only effective when running with `docker-compose` or `docker run`.
+    # Docker Swarm `stack deploy` WILL IGNORE these fields; to grant capabilities/devices in Swarm
+    # use `docker service create` (see above) or run the container outside Swarm with `docker run`.
+    #
+    # -- docker-compose / docker run (informational example) --
+    # Uncomment these when using `docker-compose` locally, or use the equivalent docker run flags:
+    #
+    # cap_add:
+    #   - NET_ADMIN
+    # devices:
+    #   - /dev/net/tun:/dev/net/tun
+    #
+    # -- Swarm: use `docker service create` or `docker run` on a manager/host instead --
+    # Example (service create):
+    # docker service create --name gluetun-priv --cap-add NET_ADMIN --mount type=bind,src="${BASE_PATH}/gluetun",dst=/gluetun --mount type=bind,src=/dev/net/tun,dst=/dev/net/tun ...
+    #
+    # Retain the ports mapping below (used by other tools/services to reach gluetun's proxy).
+    ports:
+      # Expose proxy ports used by other containers if desired (adjust through .env and docs)
+      - target: 8888
+        published: 31888
+        protocol: tcp
+        mode: host
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - WEBUI_PORT=8080
+      - UMASK=${UMASK}
+      # Note: sensitive config such as torrenting credentials should be provided via /config or secrets as needed.
+      # To route traffic through gluetun in Swarm, either:
+      #  1) Configure qBittorrent to use gluetun's SOCKS/HTTP proxy (if gluetun exposes it), or
+      #  2) Run qbittorrent outside Swarm with network_mode: service:gluetun (not supported in Swarm),
+      #  3) Use an alternative VPN/proxy approach. See docs/deployment.md for instructions.
+    volumes:
+      - ${BASE_PATH}/qbittorrent/config:/config
+      - ${MEDIA_SHARE}:/share
+    ports:
+      - target: 8080
+        published: ${QB_WEBUI_PORT}
+        protocol: tcp
+        mode: host
+      - target: 8694
+        published: ${QB_TORRENT_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+      - vpn-overlay
+    depends_on:
+      - gluetun
+    restart: unless-stopped
+
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - VERSION=docker
+      - PLEX_CLAIM_FILE=/run/secrets/plex_claim
+    secrets:
+      - plex_claim
+    volumes:
+      - ${BASE_PATH}/plex/config:/config
+      - ${MEDIA_SHARE}/media/tv:/tv
+      - ${MEDIA_SHARE}/media/movies:/movies
+    devices:
+      - /dev/dri:/dev/dri
+    ports:
+      - target: 32400
+        published: ${PLEX_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+    # NOTE: Many Plex users require host networking for discovery and hardware passthrough.
+    # If you need host network for Plex, run Plex outside Swarm (see docs/deployment.md).
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/radarr/config:/config
+      - ${MEDIA_SHARE}:/share
+    ports:
+      - target: 7878
+        published: ${RADARR_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/sonarr/config:/config
+      - ${MEDIA_SHARE}:/share
+    ports:
+      - target: 8989
+        published: ${SONARR_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  readarr:
+    # Temporarily disabled (replicas: 0) because the referenced image could not be pulled
+    # from the configured registries on this host (pull attempts returned "not found").
+    # Actions to recover:
+    # 1) Choose a known-publish image and verify it on the manager node:
+    #      docker pull linuxserver/readarr:latest
+    #      docker pull linuxserver/readarr:develop
+    #      docker pull readarr/readarr:develop
+    #    If a private registry is required, ensure nodes have credentials or preload the image on every node.
+    # 2) After a successful pull, re-enable the service and force an update:
+    #      # edit docker-stack.yml to set replicas: 1 (or run the command below)
+    #      docker stack deploy --compose-file docker-stack.yml ultimate-plex
+    #      docker service update --force ultimate-plex_readarr
+    # 3) Alternatively preload the image on each node:
+    #      docker pull <chosen-image> && docker tag <chosen-image> ghcr.io/linuxserver/readarr:latest
+    #      then redeploy the stack.
+    image: ghcr.io/linuxserver/readarr:latest
+    deploy:
+      # Set to 0 to avoid task churn while a valid image is selected and verified.
+      replicas: 0
+      restart_policy:
+        condition: any
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/readarr/config:/config
+      - ${MEDIA_SHARE}:/share
+    ports:
+      - target: 8787
+        published: ${READARR_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/lidarr/config:/config
+      - ${MEDIA_SHARE}:/share
+    ports:
+      - target: 8686
+        published: ${LIDARR_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+
+  tautulli:
+    image: lscr.io/linuxserver/tautulli:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/tautulli:/config
+    ports:
+      - target: 8181
+        published: ${TAUTULLI_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+      - proxy
+    restart: unless-stopped
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
+      - TZ=${TZ}
+    ports:
+      - target: 8191
+        published: ${FLARESOLVERR_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  tdarr:
+    image: ghcr.io/haveagitgat/tdarr:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - TZ=${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - UMASK_SET=002
+      - nodeName=ServerNode
+      - serverIP=0.0.0.0
+      - serverPort=8266
+      - webUIPort=8265
+      - internalNode=true
+      - inContainer=true
+      - ffmpegVersion=6
+    volumes:
+      - ${BASE_PATH}/tdarr/server:/app/server
+      - ${BASE_PATH}/tdarr/configs:/app/configs
+      - ${BASE_PATH}/tdarr/logs:/app/logs
+      - ${MEDIA_SHARE}:/media
+      - /transcode_cache:/temp
+    devices:
+      - /dev/dri:/dev/dri
+    ports:
+      - target: 8265
+        published: ${TDARR_WEB_PORT}
+        protocol: tcp
+        mode: host
+      - target: 8266
+        published: ${TDARR_SERVER_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  autobrr:
+    image: ghcr.io/autobrr/autobrr:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - TZ=${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+    volumes:
+      - ${BASE_PATH}/autobrr/config:/config
+    ports:
+      - target: 7474
+        published: ${AUTOBRR_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/bazarr/config:/config
+      - ${MEDIA_SHARE}:/share
+    ports:
+      - target: 6767
+        published: ${BAZARR_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/prowlarr/config:/config
+    ports:
+      - target: 9696
+        published: ${PROWLARR_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  unpackerr:
+    image: golift/unpackerr:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - UN_START_DELAY=1m
+      - TZ=${TZ}
+      - UN_SONARR_0_URL=http://${SERVER_IP}:8989
+      - UN_SONARR_0_API_KEY_FILE=/run/secrets/sonarr_api_key
+      - UN_RADARR_0_URL=http://${SERVER_IP}:7878
+      - UN_RADARR_0_API_KEY_FILE=/run/secrets/radarr_api_key
+    volumes:
+      - ${MEDIA_SHARE}:/share
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  dozzle:
+    image: amir20/dozzle:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - target: 8080
+        published: ${DOZZLE_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  cross-seed:
+    image: ghcr.io/cross-seed/cross-seed:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+    volumes:
+      - ${BASE_PATH}/cross-seed/config:/config
+      - ${BASE_PATH}/qbittorrent/config/qBittorrent/BT_backup:/torrents:ro
+      - ${MEDIA_SHARE}/cross-seed/current-cross-seeds:/cross-seeds
+    ports:
+      - target: 2468
+        published: ${CROSSSEED_PORT}
+        protocol: tcp
+        mode: host
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  plex-meta-manager:
+    image: meisnate12/plex-meta-manager:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    environment:
+      - TZ=${TZ}
+      - PMM_CONFIG=/config/config.yml
+      - PMM_RUN=true
+    volumes:
+      - ${BASE_PATH}/plex-meta-manager/config:/config
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  wizarr:
+    image: ghcr.io/wizarrrr/wizarr:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    ports:
+      - target: 5690
+        published: ${WIZARR_PORT}
+        protocol: tcp
+        mode: host
+    volumes:
+      - ${BASE_PATH}/wizarr/data/database:/data/database
+    networks:
+      - media-overlay
+    restart: unless-stopped
+
+  recyclarr:
+    image: ghcr.io/recyclarr/recyclarr:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+    user: "${PUID}:${PGID}"
+    volumes:
+      - ${BASE_PATH}/recyclarr/config:/config
+    environment:
+      - TZ=${TZ}
+    networks:
+      - media-overlay
+    restart: unless-stopped

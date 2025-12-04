@@ -86,3 +86,11 @@ Anytime you reference your media folder in a container you want the path to look
 2. Portainer - Docker GUI
 3. UptimeKuma - Gives you the ability to monitor your services
 
+## Repository cleanup
+
+A conservative cleanup was performed to remove obvious runtime artifacts and reduce repository clutter:
+
+- Removed `.env.bak.*` files (local environment backups).
+- Removed the `tmp/` directory (temporary runtime files created by scripts/containers).
+
+These files are considered local/runtime artifacts and should not be tracked in git. To prevent re-adding them, add appropriate entries to `.gitignore` (for example: `.env.bak*` and `tmp/`). If you need any of these files preserved, restore them from your local backups before pulling future changes.

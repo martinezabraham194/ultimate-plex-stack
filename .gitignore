@@ -1,0 +1,17 @@
+# Local environment files
+.env
+.env.bak*
+
+# Temporary runtime files
+tmp/
+
+# Editor / OS files
+.vscode/
+.DS_Store
+
+# Python / Node caches
+__pycache__/
+node_modules/
+
+# Misc
+*.local
