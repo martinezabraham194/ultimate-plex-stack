@@ -1,0 +1,25 @@
+name: Deploy to Self-Hosted Runner
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create .env file
+        run: echo "${{ secrets.ENV_FILE }}" > .env
+
+      - name: Pull latest images
+        run: docker compose pull
+
+      - name: Deploy stack
+        run: docker compose up -d
+
+      - name: Prune unused images
+        run: docker image prune -f
