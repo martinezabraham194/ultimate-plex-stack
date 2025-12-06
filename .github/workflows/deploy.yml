@@ -22,6 +22,17 @@ jobs:
           fi
           echo "$ENV_FILE_CONTENT" > .env
 
+      - name: Create WireGuard config
+        env:
+          WG_CONF: ${{ secrets.WIREGUARD_CONF }}
+        run: |
+          if [ -z "$WG_CONF" ]; then
+            echo "::warning::WIREGUARD_CONF secret is missing! Gluetun might fail."
+          else
+            mkdir -p config/wireguard
+            echo "$WG_CONF" > config/wireguard/wg0.conf
+          fi
+
       - name: Pull latest images
         run: docker compose pull
 

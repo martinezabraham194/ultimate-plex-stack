@@ -148,7 +148,7 @@ services:
           PORT=$(cat /tmp/gluetun/forwarded_port);
           echo "pf-updater: applying port $${PORT}";
           STATUS=$(curl -s --http1.1 -o /dev/null -w "%{http_code}" -d "json={\"listen_port\":$${PORT}}" "http://localhost:${QB_WEBUI_PORT}/api/v2/app/setPreferences");
-          if [ "$STATUS" = "200" ]; then
+          if [ "$$STATUS" = "200" ]; then
             echo "pf-updater: applied port $${PORT}";
             sleep 300;
           else
