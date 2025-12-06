@@ -43,7 +43,7 @@ jobs:
           # Force clean to ensure no directory exists
           rm -rf tmp
           mkdir -p tmp
-          echo "[]" > tmp/servers.json
+          echo "{}" > tmp/servers.json
           ls -l tmp/servers.json
 
       - name: Pull latest images
