@@ -38,6 +38,11 @@ jobs:
             echo "$WG_CONF" > config/wireguard/wg0.conf
           fi
 
+      - name: Create servers.json placeholder
+        run: |
+          mkdir -p tmp
+          echo "[]" > tmp/servers.json
+
       - name: Pull latest images
         run: docker compose pull
 
