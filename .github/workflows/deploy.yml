@@ -9,6 +9,10 @@ jobs:
   deploy:
     runs-on: self-hosted
     steps:
+      - name: Fix permissions (pre-checkout)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/workspace" alpine rm -rf /workspace/config || true
+
       - name: Checkout code
         uses: actions/checkout@v4
 
