@@ -50,7 +50,10 @@ jobs:
         run: docker compose pull
 
       - name: Deploy stack
-        run: docker compose up -d
+        run: |
+          # Tear down to remove potentially broken container states (e.g. dir/file mount mismatches)
+          docker compose down
+          docker compose up -d
 
       - name: Prune unused images
         run: docker image prune -f
