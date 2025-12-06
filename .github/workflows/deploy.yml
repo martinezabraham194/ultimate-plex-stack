@@ -11,7 +11,8 @@ jobs:
     steps:
       - name: Fix permissions (pre-checkout)
         run: |
-          docker run --rm -v "${{ github.workspace }}:/workspace" alpine rm -rf /workspace/config || true
+          # Clean up any root-owned artifacts from previous runs
+          docker run --rm -v "${{ github.workspace }}:/workspace" alpine sh -c "find /workspace -maxdepth 1 -mindepth 1 -not -name '.' | xargs rm -rf" || true
 
       - name: Checkout code
         uses: actions/checkout@v4
