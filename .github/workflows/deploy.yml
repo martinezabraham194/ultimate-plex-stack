@@ -13,7 +13,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Create .env file
-        run: echo "${{ secrets.ENV_FILE }}" > .env
+        env:
+          ENV_FILE_CONTENT: ${{ secrets.ENV_FILE }}
+        run: |
+          if [ -z "$ENV_FILE_CONTENT" ]; then
+            echo "::error::ENV_FILE secret is missing or empty!"
+            exit 1
+          fi
+          echo "$ENV_FILE_CONTENT" > .env
 
       - name: Pull latest images
         run: docker compose pull
